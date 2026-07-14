@@ -1,0 +1,27 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release archive
+        run: |
+          mkdir -p release
+          cp -R src release/src
+          cp -R docs release/docs
+          cp -R tests release/tests
+          cp -R examples release/examples
+          cp README.md release/README.md
+          tar -czf release.tar.gz release
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
