@@ -16,6 +16,9 @@
 .PARAMETER CriticalDays
     Number of days left that triggers CRITICAL status.
 
+.PARAMETER EnableLogging
+    Enables logging to the ProgramData folder.
+
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain example-domain.com
 #>
@@ -27,11 +30,58 @@ param(
     [string]$Domain,
 
     [int]$WarningDays = 30,
-    [int]$CriticalDays = 10
+    [int]$CriticalDays = 10,
+    [switch]$EnableLogging
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$script:CacheTtlSeconds = 300
+$script:CacheRoot = if ($env:ProgramData) { Join-Path $env:ProgramData 'PRTG-DomainExpiration\Cache' } else { Join-Path $PSScriptRoot 'Cache' }
+$script:LogPath = if ($env:ProgramData) { Join-Path $env:ProgramData 'PRTG-DomainExpiration\Check-DomainExpiration.log' } else { Join-Path $PSScriptRoot 'Check-DomainExpiration.log' }
+
+function Write-Log {
+    param([string]$Message)
+    if (-not $EnableLogging) { return }
+    if (-not (Test-Path (Split-Path $script:LogPath -Parent))) {
+        New-Item -ItemType Directory -Path (Split-Path $script:LogPath -Parent) -Force | Out-Null
+    }
+    Add-Content -Path $script:LogPath -Value ("[{0}] {1}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $Message)
+}
+
+function Get-CacheFilePath {
+    param([string]$Key)
+    if (-not $Key) { return $null }
+    $safe = [regex]::Replace($Key.ToLowerInvariant(), '[^a-z0-9]', '_')
+    return Join-Path $script:CacheRoot ($safe + '.json')
+}
+
+function Get-CacheValue {
+    param([string]$Key)
+    $path = Get-CacheFilePath -Key $Key
+    if (-not $path -or -not (Test-Path $path)) { return $null }
+    try {
+        $item = Get-Item -Path $path
+        $ageSeconds = ((Get-Date).ToUniversalTime() - $item.LastWriteTimeUtc).TotalSeconds
+        if ($ageSeconds -gt $script:CacheTtlSeconds) { return $null }
+        $content = Get-Content -Path $path -Raw
+        return $content | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Set-CacheValue {
+    param([string]$Key,[object]$Value)
+    $path = Get-CacheFilePath -Key $Key
+    if (-not $path) { return }
+    if (-not (Test-Path $script:CacheRoot)) {
+        New-Item -ItemType Directory -Path $script:CacheRoot -Force | Out-Null
+    }
+    $Value | ConvertTo-Json -Depth 5 | Set-Content -Path $path -Encoding UTF8
+}
 
 function Get-RootDomain {
     <#
@@ -68,25 +118,19 @@ function Get-SupportedZoneInfo {
     #>
     param([string]$Name)
 
-    $zone = $null
-    $parts = $Name.Split('.')
-    if ($parts.Length -gt 1) {
-        $zone = '.' + $parts[$parts.Length - 1]
-    }
-
     $map = @{
         '.com' = @{ Provider = 'rdap'; RdapUrl = 'https://rdap.verisign.com/com/v1/domain/'; WhoisHost = 'whois.verisign-grs.com' }
         '.net' = @{ Provider = 'rdap'; RdapUrl = 'https://rdap.verisign.com/net/v1/domain/'; WhoisHost = 'whois.verisign-grs.com' }
         '.org' = @{ Provider = 'rdap'; RdapUrl = 'https://rdap.verisign.com/org/v1/domain/'; WhoisHost = 'whois.pir.org' }
         '.ua' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.ua' }
-        '.com.ua' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.com.ua' }
-        '.dp.ua' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.dp.ua' }
+        '.com.ua' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.ua' }
+        '.dp.ua' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.ua' }
+        '.kiev.ua' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.ua' }
         '.wine' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.nic.wine' }
         '.pro' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.nic.pro' }
         '.cy' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.nic.cy' }
         '.bg' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.register.bg' }
         '.ae' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.aeda.net.ae' }
-        '.kiyv.ua' = @{ Provider = 'whois'; RdapUrl = $null; WhoisHost = 'whois.kiev.ua' }
     }
 
     foreach ($entry in $map.Keys) {
@@ -117,18 +161,32 @@ function Send-WhoisQuery {
             $client = New-Object System.Net.Sockets.TcpClient
             $client.SendTimeout = $TimeoutMs
             $client.ReceiveTimeout = $TimeoutMs
-            $connect = $client.ConnectAsync($Host, 43)
-            if (-not $connect.Wait($TimeoutMs)) {
+            $asyncResult = $client.BeginConnect($Host, 43, $null, $null)
+            if (-not $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+                $client.Close()
                 throw 'Connection timed out'
             }
+            $client.EndConnect($asyncResult) | Out-Null
             $stream = $client.GetStream()
+            $stream.ReadTimeout = $TimeoutMs
             $writer = New-Object System.IO.StreamWriter($stream)
             $writer.WriteLine($Domain)
             $writer.Flush()
-            $reader = New-Object System.IO.StreamReader($stream)
-            $content = $reader.ReadToEnd()
+            $builder = New-Object System.Text.StringBuilder
+            $buffer = New-Object byte[] 4096
+            $maxChars = 20000
+            try {
+                while ($builder.Length -lt $maxChars) {
+                    $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
+                    if ($bytesRead -le 0) { break }
+                    $chunk = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $bytesRead)
+                    [void]$builder.Append($chunk)
+                }
+            }
+            catch {
+            }
+            $content = $builder.ToString()
             $writer.Dispose()
-            $reader.Dispose()
             $stream.Dispose()
             $client.Dispose()
             return $content
@@ -151,6 +209,7 @@ function Get-RdapData {
     param([string]$Url)
 
     try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
         $request = [System.Net.WebRequest]::Create($Url)
         $request.Timeout = 10000
         $response = $request.GetResponse()
@@ -176,7 +235,9 @@ function Get-ExpirationDateFromText {
 
     $patterns = @(
         'Registry Expiry Date',
+        'Expiry Date',
         'Expiration Date',
+        'Expiration Time',
         'Registry Expiration Date',
         'expires',
         'paid-till',
@@ -188,7 +249,19 @@ function Get-ExpirationDateFromText {
         $match = [regex]::Match($Text, '(?i)' + [regex]::Escape($pattern) + '\s*[:=]\s*([^\r\n]+)')
         if ($match.Success) {
             $value = $match.Groups[1].Value.Trim()
-            $value = $value -replace '[^0-9A-Za-z:\-\. ]', ''
+            $value = $value -replace '[^0-9A-Za-z:\-\.T+Z /]', ''
+            $value = $value.Trim()
+            if ($value) {
+                return $value
+            }
+        }
+    }
+
+    foreach ($pattern in $patterns) {
+        $match = [regex]::Match($Text, '(?i)' + [regex]::Escape($pattern) + '\s+([^\r\n]+)')
+        if ($match.Success) {
+            $value = $match.Groups[1].Value.Trim()
+            $value = $value -replace '[^0-9A-Za-z:\-\.T+Z /]', ''
             $value = $value.Trim()
             if ($value) {
                 return $value
@@ -209,7 +282,7 @@ function Get-RdapExpirationDate {
     if ([string]::IsNullOrWhiteSpace($JsonText)) { return $null }
 
     try {
-        $json = $jsonText | ConvertFrom-Json
+        $json = $JsonText | ConvertFrom-Json
     }
     catch {
         return $null
@@ -246,6 +319,29 @@ function Get-ReferralHost {
     return $null
 }
 
+function Get-RegistrarFromText {
+    <#
+    .SYNOPSIS
+        Extracts the registrar name from WHOIS or RDAP text.
+    #>
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+
+    $patterns = @('Sponsoring Registrar', 'Registrar')
+    foreach ($pattern in $patterns) {
+        $match = [regex]::Match($Text, '(?im)^\s*' + [regex]::Escape($pattern) + '\s*[:=]\s*([^\r\n]+)')
+        if ($match.Success) {
+            $value = $match.Groups[1].Value.Trim()
+            if ($value -and $value -notmatch '^whois') {
+                return $value
+            }
+        }
+    }
+
+    return $null
+}
+
 function Convert-ToDateTimeUtc {
     <#
     .SYNOPSIS
@@ -256,12 +352,14 @@ function Convert-ToDateTimeUtc {
     if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
 
     $normalized = $Value.Trim()
-    $normalized = $normalized -replace 'T', ' '
-    $normalized = $normalized -replace 'Z$', ''
     $normalized = $normalized -replace '\.$', ''
 
-    $candidates = @(
+    $formats = @(
+        'yyyy-MM-ddTHH:mm:ssK',
+        'yyyy-MM-ddTHH:mm:ss',
+        'yyyy-MM-dd HH:mm:ssK',
         'yyyy-MM-dd HH:mm:ss',
+        'yyyy-MM-ddTHH:mmK',
         'yyyy-MM-dd HH:mm',
         'yyyy-MM-dd',
         'yyyy.MM.dd',
@@ -270,7 +368,7 @@ function Convert-ToDateTimeUtc {
         'dd-MMM-yyyy HH:mm'
     )
 
-    foreach ($format in $candidates) {
+    foreach ($format in $formats) {
         try {
             $parsed = [datetime]::ParseExact($normalized, $format, [System.Globalization.CultureInfo]::InvariantCulture)
             return $parsed.ToUniversalTime()
@@ -305,6 +403,22 @@ function Get-DaysRemaining {
     return [int](($ExpirationDate - $now).TotalDays)
 }
 
+function Get-StatusCode {
+    <#
+    .SYNOPSIS
+        Maps days remaining to a numeric PRTG status code.
+    #>
+    param(
+        [int]$DaysRemaining,
+        [int]$WarningDays,
+        [int]$CriticalDays
+    )
+
+    if ($DaysRemaining -le $CriticalDays) { return 2 }
+    if ($DaysRemaining -le $WarningDays) { return 1 }
+    return 0
+}
+
 function Get-Status {
     <#
     .SYNOPSIS
@@ -316,9 +430,18 @@ function Get-Status {
         [int]$CriticalDays
     )
 
-    if ($DaysRemaining -le $CriticalDays) { return 'CRITICAL' }
-    if ($DaysRemaining -le $WarningDays) { return 'WARNING' }
-    return 'OK'
+    $code = Get-StatusCode -DaysRemaining $DaysRemaining -WarningDays $WarningDays -CriticalDays $CriticalDays
+    switch ($code) {
+        2 { return 'CRITICAL' }
+        1 { return 'WARNING' }
+        default { return 'OK' }
+    }
+}
+
+function ConvertTo-XmlSafeText {
+    param([string]$Text)
+    if ($Text -eq $null) { return '' }
+    return [System.Security.SecurityElement]::Escape($Text)
 }
 
 function Write-PrtgXml {
@@ -327,24 +450,52 @@ function Write-PrtgXml {
         Writes a PRTG-compatible XML result.
     #>
     param(
+        [int]$DaysRemaining,
+        [datetime]$ExpirationDate,
+        [string]$Registrar,
+        [string]$Source,
         [string]$Status,
-        [string]$Message,
-        [int]$Value,
-        [string]$Text
+        [int]$StatusCode,
+        [int]$WarningDays,
+        [int]$CriticalDays
     )
+
+    $timestamp = [int64]((($ExpirationDate.ToUniversalTime()) - [datetime]'1970-01-01').TotalSeconds)
+    $text = "Domain: $Domain`n`nExpires: $($ExpirationDate.ToString('yyyy-MM-dd'))`n`nRegistrar: $Registrar`n`n$Source"
+    $escapedText = ConvertTo-XmlSafeText -Text $text
+    $escapedStatus = ConvertTo-XmlSafeText -Text $Status
 
     $xml = @"
 <prtg>
   <result>
     <channel>Days Remaining</channel>
-    <value>$Value</value>
+    <value>$DaysRemaining</value>
     <unit>Count</unit>
     <float>0</float>
     <showtime>0</showtime>
-    <text>$Text</text>
+    <LimitMode>1</LimitMode>
+    <LimitMaxWarning>$WarningDays</LimitMaxWarning>
+    <LimitMaxError>$CriticalDays</LimitMaxError>
+    <text>$escapedText</text>
+  </result>
+  <result>
+    <channel>Expiration Date (Unix Timestamp)</channel>
+    <value>$timestamp</value>
+    <unit>UnixTimestamp</unit>
+    <float>0</float>
+    <showtime>0</showtime>
+    <text>$escapedText</text>
+  </result>
+  <result>
+    <channel>Status Code</channel>
+    <value>$StatusCode</value>
+    <unit>Custom</unit>
+    <float>0</float>
+    <showtime>0</showtime>
+    <text>$escapedStatus</text>
   </result>
   <error>0</error>
-  <summary>$Message</summary>
+  <text>$escapedStatus</text>
 </prtg>
 "@
 
@@ -358,10 +509,11 @@ function Write-PrtgError {
     #>
     param([string]$Message)
 
+    $escapedMessage = ConvertTo-XmlSafeText -Text $Message
     $xml = @"
 <prtg>
   <error>1</error>
-  <summary>$Message</summary>
+  <text>$escapedMessage</text>
 </prtg>
 "@
 
@@ -369,14 +521,24 @@ function Write-PrtgError {
 }
 
 try {
+    Write-Log -Message "Starting check for $Domain"
     $resolvedDomain = Get-RootDomain -Name $Domain
     if (-not $resolvedDomain) {
+        Write-Log -Message 'Domain not found.'
         Write-PrtgError -Message 'Domain not found.'
         exit 1
     }
 
+    $cache = Get-CacheValue -Key $resolvedDomain
+    if ($cache) {
+        Write-Log -Message "Using cached data for $resolvedDomain"
+        Write-PrtgXml -DaysRemaining ([int]$cache.DaysRemaining) -ExpirationDate ([datetime]$cache.ExpirationDate) -Registrar $cache.Registrar -Source $cache.Source -Status $cache.Status -StatusCode ([int]$cache.StatusCode) -WarningDays $WarningDays -CriticalDays $CriticalDays
+        exit 0
+    }
+
     $zoneInfo = Get-SupportedZoneInfo -Name $resolvedDomain
     if (-not $zoneInfo) {
+        Write-Log -Message "Unsupported zone for $resolvedDomain"
         Write-PrtgError -Message 'Unsupported domain zone.'
         exit 1
     }
@@ -384,6 +546,7 @@ try {
     $raw = $null
     $whoisHost = $null
     $source = $null
+    $registrar = $null
 
     if ($zoneInfo.Provider -eq 'rdap') {
         $rdapUrl = $zoneInfo.RdapUrl + $resolvedDomain
@@ -402,8 +565,14 @@ try {
     }
 
     if (-not $raw) {
+        Write-Log -Message "No response for $resolvedDomain"
         Write-PrtgError -Message 'Expiration date not found.'
         exit 1
+    }
+
+    $registrar = Get-RegistrarFromText -Text $raw
+    if (-not $registrar) {
+        $registrar = 'Unknown'
     }
 
     $dateValue = Get-ExpirationDateFromText -Text $raw
@@ -417,37 +586,44 @@ try {
             $whoisHost = $referralHost
             $raw = Send-WhoisQuery -Host $whoisHost -Domain $resolvedDomain
             $source = 'Referral WHOIS'
+            $registrar = Get-RegistrarFromText -Text $raw
             $dateValue = Get-ExpirationDateFromText -Text $raw
         }
     }
 
     if (-not $dateValue) {
+        Write-Log -Message "Expiration date not found for $resolvedDomain"
         Write-PrtgError -Message 'Expiration date not found.'
         exit 1
     }
 
     $expirationDate = Convert-ToDateTimeUtc -Value $dateValue
     if (-not $expirationDate) {
+        Write-Log -Message "Could not parse date $dateValue for $resolvedDomain"
         Write-PrtgError -Message 'Expiration date not found.'
         exit 1
     }
 
     $daysRemaining = Get-DaysRemaining -ExpirationDate $expirationDate
     $status = Get-Status -DaysRemaining $daysRemaining -WarningDays $WarningDays -CriticalDays $CriticalDays
+    $statusCode = Get-StatusCode -DaysRemaining $daysRemaining -WarningDays $WarningDays -CriticalDays $CriticalDays
 
-    $text = "Domain: $resolvedDomain`n`nExpires: $($expirationDate.ToString('yyyy-MM-dd'))`n`nRegistrar: Unknown"
-    if ($source) {
-        $sourceText = $source
-        if ($whoisHost) {
-            $sourceText = "${sourceText}: $whoisHost"
-        }
-        $text = "Domain: $resolvedDomain`n`nExpires: $($expirationDate.ToString('yyyy-MM-dd'))`n`nRegistrar: Unknown`n`n$sourceText"
+    $cachePayload = [ordered]@{
+        DaysRemaining = $daysRemaining
+        ExpirationDate = $expirationDate.ToUniversalTime().ToString('o')
+        Registrar = if ($registrar) { $registrar } else { 'Unknown' }
+        Source = if ($source) { $source } else { 'Unknown' }
+        Status = $status
+        StatusCode = $statusCode
     }
+    Set-CacheValue -Key $resolvedDomain -Value $cachePayload
 
-    Write-PrtgXml -Status $status -Message $status -Value $daysRemaining -Text $text
+    Write-Log -Message "Resolved $resolvedDomain -> $status ($daysRemaining days)"
+    Write-PrtgXml -DaysRemaining $daysRemaining -ExpirationDate $expirationDate -Registrar $registrar -Source $source -Status $status -StatusCode $statusCode -WarningDays $WarningDays -CriticalDays $CriticalDays
     exit 0
 }
 catch {
+    Write-Log -Message ("Exception: {0}" -f $_.Exception.Message)
     Write-PrtgError -Message 'Expiration date not found.'
     exit 1
 }

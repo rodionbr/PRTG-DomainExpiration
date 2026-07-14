@@ -3,3 +3,9 @@
 *.bak
 *.zip
 *.tar.gz
+Cache/
+*.cache
+*.pid
+*.swp
+*.swo
+
