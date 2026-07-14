@@ -8,7 +8,7 @@
     PowerShell 4.0+ and PRTG Network Monitor external sensors.
 
 .PARAMETER Domain
-    Domain name to check, for example logos-corp.com.
+    Domain name to check, for example example-domain.com.
 
 .PARAMETER WarningDays
     Number of days left that triggers WARNING status.
@@ -17,7 +17,7 @@
     Number of days left that triggers CRITICAL status.
 
 .EXAMPLE
-    powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain logos-corp.com
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain example-domain.com
 #>
 
 [CmdletBinding()]

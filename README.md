@@ -4,7 +4,7 @@ This repository contains a PowerShell-based sensor for PRTG Network Monitor that
 
 ## Project purpose
 
-The sensor accepts a domain name such as `logos-corp.com` and returns the number of days remaining until expiration in a format understood by PRTG.
+The sensor accepts a domain name such as `example-domain.com` and returns the number of days remaining until expiration in a format understood by PRTG.
 
 ## Supported domains
 
@@ -17,14 +17,14 @@ The sensor accepts a domain name such as `logos-corp.com` and returns the number
 1. Copy [src/Check-DomainExpiration.ps1](src/Check-DomainExpiration.ps1) to the PRTG Custom Sensors EXEXML folder.
 2. Create a new sensor of type EXE/Script Advanced.
 3. Configure the command line:
-   - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\Check-DomainExpiration.ps1" -Domain logos-corp.com`
+   - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\Check-DomainExpiration.ps1" -Domain example-domain.com`
 
 ## Usage
 
 Run the script locally or from PRTG with:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain logos-corp.com
+powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain example-domain.com
 ```
 
 ## Example XML output
@@ -37,7 +37,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration
     <unit>Count</unit>
     <float>0</float>
     <showtime>0</showtime>
-    <text>Domain: logos-corp.com
+    <text>Domain: example-domain.com
 
 Expires: 2027-04-04
 
