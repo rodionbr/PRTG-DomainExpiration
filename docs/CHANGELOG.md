@@ -14,6 +14,10 @@
 - Added support for `.pro`, `.wine`, `.cy`, `.bg`, and `.ae`
 - Improved error handling and fallback logic
 
+## Unreleased
+- Added detailed function documentation to the README in English and Ukrainian.
+- Documented the manual override behavior and the new `Days Remaining manual` PRTG channel.
+
 ## v1.0.0
 - Stable release for open-source use
 - Finalized structure for PRTG deployment and documentation

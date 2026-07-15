@@ -8,6 +8,25 @@ This repository contains a PowerShell-based sensor for PRTG Network Monitor that
 
 The sensor accepts a domain name such as `example-domain.com` and returns the number of days remaining until expiration in a format understood by PRTG.
 
+### Key functions
+
+- `Write-Log`: writes timestamped log entries when `-EnableLogging` is enabled.
+- `Get-CacheFilePath`, `Get-CacheValue`, `Set-CacheValue`: manage local JSON caching of results.
+- `Get-RootDomain`: normalizes input and extracts the registered domain, including special domain suffix handling.
+- `Get-SupportedZoneInfo`: maps supported zones to RDAP or WHOIS providers.
+- `Send-WhoisQuery`: queries WHOIS servers over TCP port 43 and returns raw response text.
+- `Get-RdapData`: fetches RDAP JSON data over HTTPS.
+- `Get-ExpirationDateFromText`: extracts expiration date strings from WHOIS or RDAP text.
+- `Get-RdapExpirationDate`: parses expiration events from RDAP JSON.
+- `Get-ReferralHost`: detects referral WHOIS servers from raw response text.
+- `Get-RegistrarFromText`: extracts registrar information from raw data.
+- `Convert-ToDateTimeUtc`: converts date strings into UTC DateTime values.
+- `Get-ManualExpirationDate`: builds expiration date from manual input when automatic lookup fails.
+- `Get-DaysRemaining`, `Get-StatusCode`, `Get-Status`: compute remaining days and PRTG status values.
+- `ConvertTo-XmlSafeText`: escapes text for safe XML output.
+- `Write-PrtgXml`: generates PRTG-compatible XML results, including channels: `Days Remaining`, `Days Remaining manual`, `Expiration Date (Unix Timestamp)`, and `Status Code`.
+- `Write-PrtgError`: emits error XML when expiration cannot be determined.
+
 ### Supported domains
 
 - Version 1.0: `.com`, `.net`, `.org`
@@ -27,6 +46,18 @@ Run the script locally or from PRTG with:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain example-domain.com
+```
+
+Run with manual expiration values when WHOIS/RDAP cannot resolve the date:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain example-domain.com -ManualExpirationDate 2026-12-31
+```
+
+or:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain example-domain.com -ManualDaysRemaining 120
 ```
 
 ### Example XML output
@@ -60,7 +91,8 @@ Pull the latest version from this repository and replace the script in the PRTG 
 
 - RDAP is used first when available.
 - WHOIS over TCP port 43 is used as a fallback.
-- If the expiration date cannot be determined, the script returns XML with `<error>1</error>` and the summary `Expiration date not found.`
+- If the expiration date cannot be determined automatically, you can supply `-ManualExpirationDate` or `-ManualDaysRemaining`.
+- If no date can be determined or entered manually, the script returns XML with `<error>1</error>` and the summary `Expiration date not found.`
 
 ### Testing
 
@@ -73,6 +105,25 @@ Example test scripts are available in [tests](tests) for common zones such as `.
 ### Мета проекту
 
 Сенсор отримує назву домену, наприклад `example-domain.com`, і повертає кількість днів, що залишилися до закінчення реєстрації, у форматі, сумісному з PRTG.
+
+### Основні функції
+
+- `Write-Log`: записує логи з мітками часу, коли ввімкнено `-EnableLogging`.
+- `Get-CacheFilePath`, `Get-CacheValue`, `Set-CacheValue`: керують локальним кешем у форматі JSON.
+- `Get-RootDomain`: нормалізує введення та визначає зареєстрований домен, включно зі спеціальними суфіксами.
+- `Get-SupportedZoneInfo`: зіставляє підтримувані зони з RDAP або WHOIS провайдерами.
+- `Send-WhoisQuery`: виконує WHOIS-запити через TCP-порт 43 та повертає сирий текст.
+- `Get-RdapData`: отримує RDAP JSON через HTTPS.
+- `Get-ExpirationDateFromText`: витягує дату закінчення з WHOIS або RDAP тексту.
+- `Get-RdapExpirationDate`: розбирає дату закінчення з RDAP JSON.
+- `Get-ReferralHost`: визначає реферальний WHOIS-сервер з відповіді.
+- `Get-RegistrarFromText`: витягує інформацію про реєстратора з сирих даних.
+- `Convert-ToDateTimeUtc`: перетворює рядки дат у UTC DateTime.
+- `Get-ManualExpirationDate`: формує дату закінчення з ручного вводу, якщо автоматичний пошук не спрацював.
+- `Get-DaysRemaining`, `Get-StatusCode`, `Get-Status`: обчислюють залишок днів і статус для PRTG.
+- `ConvertTo-XmlSafeText`: екранує текст для безпечного XML-виводу.
+- `Write-PrtgXml`: генерує XML-результат для PRTG з каналами `Days Remaining`, `Days Remaining manual`, `Expiration Date (Unix Timestamp)` та `Status Code`.
+- `Write-PrtgError`: повертає XML помилки, якщо дату не вдалося знайти.
 
 ### Підтримувані домени
 

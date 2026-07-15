@@ -19,6 +19,12 @@
 .PARAMETER EnableLogging
     Enables logging to the ProgramData folder.
 
+.PARAMETER ManualExpirationDate
+    Manually specify the expiration date when automatic lookup fails.
+
+.PARAMETER ManualDaysRemaining
+    Manually specify how many days remain until expiration when automatic lookup fails.
+
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain example-domain.com
 #>
@@ -31,6 +37,8 @@ param(
 
     [int]$WarningDays = 30,
     [int]$CriticalDays = 10,
+    [datetime]$ManualExpirationDate,
+    [int]$ManualDaysRemaining,
     [switch]$EnableLogging
 )
 
@@ -193,12 +201,12 @@ function Send-WhoisQuery {
         }
         catch {
             if ($attempt -ge $Retries) {
-                throw
+                return $null
             }
         }
     }
 
-    throw 'WHOIS query failed after retries.'
+    return $null
 }
 
 function Get-RdapData {
@@ -412,6 +420,27 @@ function Convert-ToDateTimeUtc {
     return $null
 }
 
+function Get-ManualExpirationDate {
+    <#
+    .SYNOPSIS
+        Converts manual override values to a UTC expiration date.
+    #>
+    param(
+        [datetime]$ManualExpirationDate,
+        [int]$ManualDaysRemaining
+    )
+
+    if ($ManualExpirationDate) {
+        return $ManualExpirationDate.ToUniversalTime()
+    }
+
+    if ($PSBoundParameters.ContainsKey('ManualDaysRemaining')) {
+        return ([datetime]::UtcNow).AddDays($ManualDaysRemaining)
+    }
+
+    return $null
+}
+
 function Get-DaysRemaining {
     <#
     .SYNOPSIS
@@ -477,13 +506,15 @@ function Write-PrtgXml {
         [string]$Status,
         [int]$StatusCode,
         [int]$WarningDays,
-        [int]$CriticalDays
+        [int]$CriticalDays,
+        [int]$ManualDaysRemaining = 0
     )
 
     $timestamp = [int64]((($ExpirationDate.ToUniversalTime()) - [datetime]'1970-01-01').TotalSeconds)
-    $text = "Domain: $Domain`n`nExpires: $($ExpirationDate.ToString('yyyy-MM-dd'))`n`nRegistrar: $Registrar`n`n$Source"
+    $statusText = "$Status ($DaysRemaining days remaining)"
+    $text = "Domain: $Domain`n`nExpires: $($ExpirationDate.ToString('yyyy-MM-dd'))`n`nDays remaining: $DaysRemaining`n`nRegistrar: $Registrar`n`nSource: $Source"
     $escapedText = ConvertTo-XmlSafeText -Text $text
-    $escapedStatus = ConvertTo-XmlSafeText -Text $Status
+    $escapedStatus = ConvertTo-XmlSafeText -Text $statusText
 
     $xml = @"
 <prtg>
@@ -498,6 +529,17 @@ function Write-PrtgXml {
     <LimitMaxError>$CriticalDays</LimitMaxError>
     <text>$escapedText</text>
   </result>
+  <result>
+    <channel>Days Remaining manual</channel>
+    <value>$ManualDaysRemaining</value>
+    <unit>Count</unit>
+    <float>0</float>
+    <showtime>0</showtime>
+    <text>$escapedText</text>
+  </result>
+"@
+
+    $xml += @"
   <result>
     <channel>Expiration Date (Unix Timestamp)</channel>
     <value>$timestamp</value>
@@ -552,12 +594,41 @@ try {
     $cache = Get-CacheValue -Key $resolvedDomain
     if ($cache) {
         Write-Log -Message "Using cached data for $resolvedDomain"
-        Write-PrtgXml -DaysRemaining ([int]$cache.DaysRemaining) -ExpirationDate ([datetime]$cache.ExpirationDate) -Registrar $cache.Registrar -Source $cache.Source -Status $cache.Status -StatusCode ([int]$cache.StatusCode) -WarningDays $WarningDays -CriticalDays $CriticalDays
+        $cachedManualDays = if ($cache.Source -eq 'Manual') { [int]$cache.ManualDaysRemaining } else { [int]$cache.DaysRemaining }
+        Write-PrtgXml -DaysRemaining ([int]$cache.DaysRemaining) -ExpirationDate ([datetime]$cache.ExpirationDate) -Registrar $cache.Registrar -Source $cache.Source -Status $cache.Status -StatusCode ([int]$cache.StatusCode) -WarningDays $WarningDays -CriticalDays $CriticalDays -ManualDaysRemaining $cachedManualDays
         exit 0
     }
 
     $zoneInfo = Get-SupportedZoneInfo -Name $resolvedDomain
     if (-not $zoneInfo) {
+        if ($PSBoundParameters.ContainsKey('ManualExpirationDate') -or $PSBoundParameters.ContainsKey('ManualDaysRemaining')) {
+            Write-Log -Message "Unsupported zone for $resolvedDomain, using manual override"
+            $manualExpiration = Get-ManualExpirationDate -ManualExpirationDate $ManualExpirationDate -ManualDaysRemaining $ManualDaysRemaining
+            if ($manualExpiration) {
+                $expirationDate = $manualExpiration
+                $source = 'Manual'
+                $registrar = 'Manual'
+                $manualDaysValue = if ($PSBoundParameters.ContainsKey('ManualDaysRemaining')) { [int]$ManualDaysRemaining } else { $null }
+                $daysRemaining = Get-DaysRemaining -ExpirationDate $expirationDate
+                if (-not $manualDaysValue) { $manualDaysValue = $daysRemaining }
+                $status = Get-Status -DaysRemaining $daysRemaining -WarningDays $WarningDays -CriticalDays $CriticalDays
+                $statusCode = Get-StatusCode -DaysRemaining $daysRemaining -WarningDays $WarningDays -CriticalDays $CriticalDays
+                $cachePayload = [ordered]@{
+                    DaysRemaining = $daysRemaining
+                    ExpirationDate = $expirationDate.ToUniversalTime().ToString('o')
+                    Registrar = $registrar
+                    Source = $source
+                    Status = $status
+                    StatusCode = $statusCode
+                    ManualDaysRemaining = $manualDaysValue
+                }
+                Set-CacheValue -Key $resolvedDomain -Value $cachePayload
+                Write-Log -Message "Resolved $resolvedDomain -> $status ($daysRemaining days) via manual override"
+                Write-PrtgXml -DaysRemaining $daysRemaining -ExpirationDate $expirationDate -Registrar $registrar -Source $source -Status $status -StatusCode $statusCode -WarningDays $WarningDays -CriticalDays $CriticalDays -ManualDaysRemaining $manualDaysValue
+                exit 0
+            }
+        }
+
         Write-Log -Message "Unsupported zone for $resolvedDomain"
         Write-PrtgError -Message 'Unsupported domain zone.'
         exit 1
@@ -567,6 +638,7 @@ try {
     $whoisHost = $null
     $source = $null
     $registrar = $null
+    $manualDaysValue = $null
 
     if ($zoneInfo.Provider -eq 'rdap') {
         $rdapUrl = $zoneInfo.RdapUrl + $resolvedDomain
@@ -589,6 +661,38 @@ try {
         $snippet = '<no raw response>'
         try { if ($raw) { $snippet = $raw.Substring(0, [Math]::Min($raw.Length, 1000)) } } catch { }
         Write-Log -Message ("No response details for {0}. WhoisHost: {1}. Snippet: {2}" -f $resolvedDomain, $whoisHost, $snippet)
+
+        if ($PSBoundParameters.ContainsKey('ManualExpirationDate') -or $PSBoundParameters.ContainsKey('ManualDaysRemaining')) {
+            $manualExpiration = Get-ManualExpirationDate -ManualExpirationDate $ManualExpirationDate -ManualDaysRemaining $ManualDaysRemaining
+            if ($manualExpiration) {
+                Write-Log -Message "Using manual expiration override for $resolvedDomain"
+                $expirationDate = $manualExpiration
+                $source = 'Manual'
+                $registrar = 'Manual'
+                if ($PSBoundParameters.ContainsKey('ManualDaysRemaining')) {
+                    $manualDaysValue = [int]$ManualDaysRemaining
+                }
+
+                $daysRemaining = Get-DaysRemaining -ExpirationDate $expirationDate
+                if (-not $manualDaysValue) { $manualDaysValue = $daysRemaining }
+                $status = Get-Status -DaysRemaining $daysRemaining -WarningDays $WarningDays -CriticalDays $CriticalDays
+                $statusCode = Get-StatusCode -DaysRemaining $daysRemaining -WarningDays $WarningDays -CriticalDays $CriticalDays
+                $cachePayload = [ordered]@{
+                    DaysRemaining = $daysRemaining
+                    ExpirationDate = $expirationDate.ToUniversalTime().ToString('o')
+                    Registrar = $registrar
+                    Source = $source
+                    Status = $status
+                    StatusCode = $statusCode
+                    ManualDaysRemaining = $manualDaysValue
+                }
+                Set-CacheValue -Key $resolvedDomain -Value $cachePayload
+                Write-Log -Message "Resolved $resolvedDomain -> $status ($daysRemaining days) via manual override"
+                Write-PrtgXml -DaysRemaining $daysRemaining -ExpirationDate $expirationDate -Registrar $registrar -Source $source -Status $status -StatusCode $statusCode -WarningDays $WarningDays -CriticalDays $CriticalDays -ManualDaysRemaining $manualDaysValue
+                exit 0
+            }
+        }
+
         Write-PrtgError -Message 'Expiration date not found.'
         exit 1
     }
@@ -614,7 +718,31 @@ try {
         }
     }
 
-    if (-not $dateValue) {
+    $expirationDate = $null
+    if ($dateValue) {
+        $expirationDate = Convert-ToDateTimeUtc -Value $dateValue
+        if (-not $expirationDate) {
+            $snippet = '<no raw available>'
+            try { if ($raw) { $snippet = $raw.Substring(0, [Math]::Min($raw.Length, 1000)) } } catch { }
+            Write-Log -Message ("Could not parse date '{0}' for {1}. Source: {2}. Registrar: {3}. WhoisHost: {4}. RawSnippet: {5}" -f $dateValue, $resolvedDomain, $source, $registrar, $whoisHost, $snippet)
+        }
+    }
+
+    $manualDaysValue = $null
+    if (-not $expirationDate -and ($PSBoundParameters.ContainsKey('ManualExpirationDate') -or $PSBoundParameters.ContainsKey('ManualDaysRemaining'))) {
+        $manualExpiration = Get-ManualExpirationDate -ManualExpirationDate $ManualExpirationDate -ManualDaysRemaining $ManualDaysRemaining
+        if ($manualExpiration) {
+            Write-Log -Message "Using manual expiration override for $resolvedDomain"
+            $expirationDate = $manualExpiration
+            $source = 'Manual'
+            $registrar = if ($registrar) { $registrar } else { 'Manual' }
+            if ($PSBoundParameters.ContainsKey('ManualDaysRemaining')) {
+                $manualDaysValue = [int]$ManualDaysRemaining
+            }
+        }
+    }
+
+    if (-not $expirationDate) {
         $snippet = '<no raw available>'
         try { if ($raw) { $snippet = $raw.Substring(0, [Math]::Min($raw.Length, 1000)) } } catch { }
         Write-Log -Message ("Expiration date not found for {0}. Source: {1}. Registrar: {2}. WhoisHost: {3}. RawSnippet: {4}" -f $resolvedDomain, $source, $registrar, $whoisHost, $snippet)
@@ -622,16 +750,10 @@ try {
         exit 1
     }
 
-    $expirationDate = Convert-ToDateTimeUtc -Value $dateValue
-    if (-not $expirationDate) {
-        $snippet = '<no raw available>'
-        try { if ($raw) { $snippet = $raw.Substring(0, [Math]::Min($raw.Length, 1000)) } } catch { }
-        Write-Log -Message ("Could not parse date '{0}' for {1}. Source: {2}. Registrar: {3}. WhoisHost: {4}. RawSnippet: {5}" -f $dateValue, $resolvedDomain, $source, $registrar, $whoisHost, $snippet)
-        Write-PrtgError -Message 'Expiration date not found.'
-        exit 1
-    }
-
     $daysRemaining = Get-DaysRemaining -ExpirationDate $expirationDate
+    if ($source -eq 'Manual' -and -not $manualDaysValue) {
+        $manualDaysValue = $daysRemaining
+    }
     $status = Get-Status -DaysRemaining $daysRemaining -WarningDays $WarningDays -CriticalDays $CriticalDays
     $statusCode = Get-StatusCode -DaysRemaining $daysRemaining -WarningDays $WarningDays -CriticalDays $CriticalDays
 
@@ -642,11 +764,15 @@ try {
         Source = if ($source) { $source } else { 'Unknown' }
         Status = $status
         StatusCode = $statusCode
+        ManualDaysRemaining = if ($manualDaysValue) { $manualDaysValue } else { 0 }
     }
     Set-CacheValue -Key $resolvedDomain -Value $cachePayload
 
     Write-Log -Message "Resolved $resolvedDomain -> $status ($daysRemaining days)"
-    Write-PrtgXml -DaysRemaining $daysRemaining -ExpirationDate $expirationDate -Registrar $registrar -Source $source -Status $status -StatusCode $statusCode -WarningDays $WarningDays -CriticalDays $CriticalDays
+    if ($manualDaysValue -eq $null) {
+        $manualDaysValue = $daysRemaining
+    }
+    Write-PrtgXml -DaysRemaining $daysRemaining -ExpirationDate $expirationDate -Registrar $registrar -Source $source -Status $status -StatusCode $statusCode -WarningDays $WarningDays -CriticalDays $CriticalDays -ManualDaysRemaining $manualDaysValue
     exit 0
 }
 catch {
