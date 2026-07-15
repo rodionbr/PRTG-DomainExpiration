@@ -148,7 +148,7 @@ function Send-WhoisQuery {
         Sends a WHOIS query over TCP port 43.
     #>
     param(
-        [string]$Host,
+        [string]$WhoisHost,
         [string]$Domain,
         [int]$TimeoutMs = 10000,
         [int]$Retries = 3
@@ -161,7 +161,7 @@ function Send-WhoisQuery {
             $client = New-Object System.Net.Sockets.TcpClient
             $client.SendTimeout = $TimeoutMs
             $client.ReceiveTimeout = $TimeoutMs
-            $asyncResult = $client.BeginConnect($Host, 43, $null, $null)
+            $asyncResult = $client.BeginConnect($WhoisHost, 43, $null, $null)
             if (-not $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMs)) {
                 $client.Close()
                 throw 'Connection timed out'
@@ -363,30 +363,50 @@ function Convert-ToDateTimeUtc {
         'yyyy-MM-dd HH:mm',
         'yyyy-MM-dd',
         'yyyy.MM.dd',
+        'yyyyMMdd',
+        'yyyyMMddHHmmss',
         'dd-MMM-yyyy',
         'dd-MMM-yyyy HH:mm:ss',
-        'dd-MMM-yyyy HH:mm'
+        'dd-MMM-yyyy HH:mm',
+        'dd.MM.yyyy',
+        'dd.MM.yyyy HH:mm:ss',
+        'dd.MM.yyyy HH:mm',
+        'dd/MM/yyyy',
+        'dd/MM/yyyy HH:mm:ss',
+        'MM/dd/yyyy',
+        'MM/dd/yyyy HH:mm:ss'
     )
 
     foreach ($format in $formats) {
+        foreach ($cultureName in @('InvariantCulture', 'en-US', 'ru-RU')) {
+            try {
+                $culture = if ($cultureName -eq 'InvariantCulture') { [System.Globalization.CultureInfo]::InvariantCulture } else { New-Object System.Globalization.CultureInfo($cultureName) }
+                $parsed = [datetime]::ParseExact($normalized, $format, $culture)
+                return $parsed.ToUniversalTime()
+            }
+            catch {
+            }
+        }
+    }
+
+    # Try DateTimeOffset parse with a few cultures
+    foreach ($cultureName in @('InvariantCulture', 'en-US', 'ru-RU')) {
         try {
-            $parsed = [datetime]::ParseExact($normalized, $format, [System.Globalization.CultureInfo]::InvariantCulture)
-            return $parsed.ToUniversalTime()
+            $culture = if ($cultureName -eq 'InvariantCulture') { [System.Globalization.CultureInfo]::InvariantCulture } else { New-Object System.Globalization.CultureInfo($cultureName) }
+            return ([DateTimeOffset]::Parse($normalized, $culture)).ToUniversalTime().DateTime
         }
         catch {
         }
     }
 
-    try {
-        return ([DateTimeOffset]::Parse($normalized, [System.Globalization.CultureInfo]::InvariantCulture)).ToUniversalTime().DateTime
-    }
-    catch {
-    }
-
-    try {
-        return ([datetime]$normalized).ToUniversalTime()
-    }
-    catch {
+    # Fallback to general DateTime parse with culture variants
+    foreach ($cultureName in @('InvariantCulture', 'en-US', 'ru-RU')) {
+        try {
+            $culture = if ($cultureName -eq 'InvariantCulture') { [System.Globalization.CultureInfo]::InvariantCulture } else { New-Object System.Globalization.CultureInfo($cultureName) }
+            return ([datetime]::Parse($normalized, $culture)).ToUniversalTime()
+        }
+        catch {
+        }
     }
 
     return $null
@@ -558,7 +578,7 @@ try {
 
     if (-not $raw) {
         $whoisHost = $zoneInfo.WhoisHost
-        $raw = Send-WhoisQuery -Host $whoisHost -Domain $resolvedDomain
+        $raw = Send-WhoisQuery -WhoisHost $whoisHost -Domain $resolvedDomain
         if ($raw) {
             $source = 'WHOIS'
         }
@@ -566,6 +586,9 @@ try {
 
     if (-not $raw) {
         Write-Log -Message "No response for $resolvedDomain"
+        $snippet = '<no raw response>'
+        try { if ($raw) { $snippet = $raw.Substring(0, [Math]::Min($raw.Length, 1000)) } } catch { }
+        Write-Log -Message ("No response details for {0}. WhoisHost: {1}. Snippet: {2}" -f $resolvedDomain, $whoisHost, $snippet)
         Write-PrtgError -Message 'Expiration date not found.'
         exit 1
     }
@@ -584,7 +607,7 @@ try {
         $referralHost = Get-ReferralHost -Text $raw
         if ($referralHost) {
             $whoisHost = $referralHost
-            $raw = Send-WhoisQuery -Host $whoisHost -Domain $resolvedDomain
+            $raw = Send-WhoisQuery -WhoisHost $whoisHost -Domain $resolvedDomain
             $source = 'Referral WHOIS'
             $registrar = Get-RegistrarFromText -Text $raw
             $dateValue = Get-ExpirationDateFromText -Text $raw
@@ -592,14 +615,18 @@ try {
     }
 
     if (-not $dateValue) {
-        Write-Log -Message "Expiration date not found for $resolvedDomain"
+        $snippet = '<no raw available>'
+        try { if ($raw) { $snippet = $raw.Substring(0, [Math]::Min($raw.Length, 1000)) } } catch { }
+        Write-Log -Message ("Expiration date not found for {0}. Source: {1}. Registrar: {2}. WhoisHost: {3}. RawSnippet: {4}" -f $resolvedDomain, $source, $registrar, $whoisHost, $snippet)
         Write-PrtgError -Message 'Expiration date not found.'
         exit 1
     }
 
     $expirationDate = Convert-ToDateTimeUtc -Value $dateValue
     if (-not $expirationDate) {
-        Write-Log -Message "Could not parse date $dateValue for $resolvedDomain"
+        $snippet = '<no raw available>'
+        try { if ($raw) { $snippet = $raw.Substring(0, [Math]::Min($raw.Length, 1000)) } } catch { }
+        Write-Log -Message ("Could not parse date '{0}' for {1}. Source: {2}. Registrar: {3}. WhoisHost: {4}. RawSnippet: {5}" -f $dateValue, $resolvedDomain, $source, $registrar, $whoisHost, $snippet)
         Write-PrtgError -Message 'Expiration date not found.'
         exit 1
     }
@@ -623,7 +650,13 @@ try {
     exit 0
 }
 catch {
-    Write-Log -Message ("Exception: {0}" -f $_.Exception.Message)
+    try {
+        $full = $_ | Out-String
+        Write-Log -Message ("Exception: {0}" -f $full)
+    }
+    catch {
+        Write-Log -Message ("Exception: {0}" -f $_.Exception.Message)
+    }
     Write-PrtgError -Message 'Expiration date not found.'
     exit 1
 }
