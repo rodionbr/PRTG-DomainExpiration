@@ -21,16 +21,16 @@ The sensor accepts a domain name such as `example-domain.com` and returns the nu
 - `Get-ReferralHost`: detects referral WHOIS servers from raw response text.
 - `Get-RegistrarFromText`: extracts registrar information from raw data.
 - `Convert-ToDateTimeUtc`: converts date strings into UTC DateTime values.
-- `Get-ManualExpirationDate`: builds expiration date from manual input when automatic lookup fails.
+- `Get-ManualExpirationDate`: builds an expiration date from manual input when automatic lookup fails.
 - `Get-DaysRemaining`, `Get-StatusCode`, `Get-Status`: compute remaining days and PRTG status values.
 - `ConvertTo-XmlSafeText`: escapes text for safe XML output.
-- `Write-PrtgXml`: generates PRTG-compatible XML results, including channels: `Days Remaining`, `Days Remaining manual`, `Expiration Date (Unix Timestamp)`, and `Status Code`.
+- `Write-PrtgXml`: generates PRTG-compatible XML results with the channels `Days Remaining`, `Days Remaining manual`, `Expiration Date (Unix Timestamp)`, and `Status Code`.
 - `Write-PrtgError`: emits error XML when expiration cannot be determined.
 
 ### Supported domains
 
 - Version 1.0: `.com`, `.net`, `.org`
-- Version 1.1: `.ua`, `.com.ua`, `.dp.ua`, `.kiyv.ua`
+- Version 1.1: `.ua`, `.com.ua`, `.dp.ua`, `.kiev.ua`
 - Version 1.2: `.pro`, `.wine`, `.cy`, `.bg`, `.ae`
 
 ### Installation
@@ -108,27 +108,27 @@ Example test scripts are available in [tests](tests) for common zones such as `.
 
 ### Основні функції
 
-- `Write-Log`: записує логи з мітками часу, коли ввімкнено `-EnableLogging`.
+- `Write-Log`: записує журнальні записи з мітками часу, коли ввімкнено `-EnableLogging`.
 - `Get-CacheFilePath`, `Get-CacheValue`, `Set-CacheValue`: керують локальним кешем у форматі JSON.
-- `Get-RootDomain`: нормалізує введення та визначає зареєстрований домен, включно зі спеціальними суфіксами.
-- `Get-SupportedZoneInfo`: зіставляє підтримувані зони з RDAP або WHOIS провайдерами.
-- `Send-WhoisQuery`: виконує WHOIS-запити через TCP-порт 43 та повертає сирий текст.
-- `Get-RdapData`: отримує RDAP JSON через HTTPS.
-- `Get-ExpirationDateFromText`: витягує дату закінчення з WHOIS або RDAP тексту.
-- `Get-RdapExpirationDate`: розбирає дату закінчення з RDAP JSON.
-- `Get-ReferralHost`: визначає реферальний WHOIS-сервер з відповіді.
+- `Get-RootDomain`: нормалізує введення та витягує зареєстрований домен, включно зі спеціальними суфіксами.
+- `Get-SupportedZoneInfo`: зіставляє підтримувані зони з провайдерами RDAP або WHOIS.
+- `Send-WhoisQuery`: виконує запити WHOIS через TCP-порт 43 і повертає сирий текст відповіді.
+- `Get-RdapData`: отримує JSON-дані RDAP через HTTPS.
+- `Get-ExpirationDateFromText`: витягує рядки дат закінчення з тексту WHOIS або RDAP.
+- `Get-RdapExpirationDate`: розбирає події закінчення з JSON RDAP.
+- `Get-ReferralHost`: визначає реферальні WHOIS-сервери з сирого тексту відповіді.
 - `Get-RegistrarFromText`: витягує інформацію про реєстратора з сирих даних.
-- `Convert-ToDateTimeUtc`: перетворює рядки дат у UTC DateTime.
-- `Get-ManualExpirationDate`: формує дату закінчення з ручного вводу, якщо автоматичний пошук не спрацював.
-- `Get-DaysRemaining`, `Get-StatusCode`, `Get-Status`: обчислюють залишок днів і статус для PRTG.
+- `Convert-ToDateTimeUtc`: перетворює рядки дат у значення UTC DateTime.
+- `Get-ManualExpirationDate`: формує дату закінчення з ручного введення, якщо автоматичний пошук не спрацював.
+- `Get-DaysRemaining`, `Get-StatusCode`, `Get-Status`: обчислюють залишок днів і статуси для PRTG.
 - `ConvertTo-XmlSafeText`: екранує текст для безпечного XML-виводу.
-- `Write-PrtgXml`: генерує XML-результат для PRTG з каналами `Days Remaining`, `Days Remaining manual`, `Expiration Date (Unix Timestamp)` та `Status Code`.
-- `Write-PrtgError`: повертає XML помилки, якщо дату не вдалося знайти.
+- `Write-PrtgXml`: генерує XML-результат, сумісний із PRTG, з каналами `Days Remaining`, `Days Remaining manual`, `Expiration Date (Unix Timestamp)` та `Status Code`.
+- `Write-PrtgError`: повертає XML помилки, якщо дату закінчення визначити не вдалося.
 
 ### Підтримувані домени
 
 - Версія 1.0: `.com`, `.net`, `.org`
-- Версія 1.1: `.ua`, `.com.ua`, `.dp.ua`, `.kiyv.ua`
+- Версія 1.1: `.ua`, `.com.ua`, `.dp.ua`, `.kiev.ua`
 - Версія 1.2: `.pro`, `.wine`, `.cy`, `.bg`, `.ae`
 
 ### Встановлення
@@ -144,6 +144,18 @@ Example test scripts are available in [tests](tests) for common zones such as `.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain example-domain.com
+```
+
+Запустіть зі значеннями вручну, якщо WHOIS/RDAP не змогли визначити дату:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain example-domain.com -ManualExpirationDate 2026-12-31
+```
+
+або:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Check-DomainExpiration.ps1 -Domain example-domain.com -ManualDaysRemaining 120
 ```
 
 ### Приклад XML-виводу
@@ -171,13 +183,14 @@ RDAP</text>
 
 ### Оновлення
 
-Оновіть репозиторій до останньої версії та замініть скрипт у папці PRTG EXEXML.
+Отримайте останню версію цього репозиторію та замініть скрипт у папці PRTG EXEXML.
 
 ### Примітки
 
-- Спочатку використовується RDAP, якщо він доступний.
+- RDAP використовується першим, якщо він доступний.
 - WHOIS через TCP-порт 43 використовується як резервний варіант.
-- Якщо дату закінчення не вдалося визначити, скрипт повертає XML з `<error>1</error>` і текстом `Expiration date not found.`
+- Якщо дату закінчення не вдалося визначити автоматично, можна передати `-ManualExpirationDate` або `-ManualDaysRemaining`.
+- Якщо дату не вдалося визначити автоматично або ввести вручну, скрипт повертає XML з `<error>1</error>` і підсумком `Expiration date not found.`
 
 ### Тестування
 
